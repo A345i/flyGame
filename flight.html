@@ -1,0 +1,1740 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Flight Combat — Auto Pilot</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { overflow: hidden; background: #000; cursor: none; touch-action: none; }
+canvas { display: block; }
+#ui {
+  position: fixed; top: 20px; left: 20px; z-index: 10;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: #fff; pointer-events: none;
+}
+#ammo { font-size: 28px; font-weight: 700; text-shadow: 0 2px 8px rgba(0,0,0,.5); }
+#speed { font-size: 14px; opacity: .7; margin-top: 4px; }
+#kills { font-size: 14px; opacity: .6; margin-top: 2px; }
+#mode-label {
+  margin-top: 6px; font-size: 13px; font-weight: 600;
+  padding: 2px 10px; border-radius: 6px; display: inline-block;
+}
+#health-bar {
+  margin-top: 10px; width: 160px; height: 8px;
+  background: rgba(0,0,0,.4); border-radius: 4px; overflow: hidden;
+}
+#health-fill {
+  height: 100%; width: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, #ff4444, #44ff44);
+  transition: width 0.3s, background 0.3s;
+}
+#hint {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: #fff; font-size: 14px; opacity: .6;
+  text-shadow: 0 1px 4px rgba(0,0,0,.5);
+  pointer-events: none; transition: opacity 2s;
+}
+#game-over {
+  display: none; position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,.7); align-items: center; justify-content: center;
+  flex-direction: column; font-family: 'Segoe UI', system-ui, sans-serif; color: #fff;
+}
+#game-over h1 { font-size: 48px; margin-bottom: 10px; }
+#game-over p { font-size: 18px; opacity: .7; margin-bottom: 24px; }
+#game-over button {
+  padding: 12px 32px; font-size: 18px; border: none; border-radius: 8px;
+  background: #4a90d9; color: #fff; cursor: pointer; pointer-events: all;
+}
+#game-over button:hover { background: #5aa0e9; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div id="ammo">🔫 0</div>
+  <div id="speed"></div>
+  <div id="kills"></div>
+  <div id="mode-label"></div>
+  <div id="health-bar"><div id="health-fill"></div></div>
+</div>
+<div id="hint">🤖 Автопилот · ЛКМ — ручное · ПКМ — огонь &nbsp;|&nbsp; 📱 Палец — летит · 2 пальца / 🔥 — огонь</div>
+<canvas id="c"></canvas>
+<div id="game-over">
+  <h1>Сбит!</h1>
+  <p id="go-stats"></p>
+  <button onclick="restartGame()">Заново</button>
+</div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const ammoEl = document.getElementById('ammo');
+const speedEl = document.getElementById('speed');
+const killsEl = document.getElementById('kills');
+const modeLabel = document.getElementById('mode-label');
+const healthFill = document.getElementById('health-fill');
+const hintEl = document.getElementById('hint');
+const gameOverEl = document.getElementById('game-over');
+const goStats = document.getElementById('go-stats');
+
+let W, H;
+// Cached gradients — created once, reused every frame
+let bulletGlowEnemy, bulletGlowNormal, bulletGlowHoming, bulletGlowDrone, vignetteGrad;
+
+function rebuildGradients() {
+  // Bullet glow gradients (8px radius — fixed size)
+  bulletGlowEnemy = ctx.createRadialGradient(0, 0, 0, 0, 0, 8);
+  bulletGlowEnemy.addColorStop(0, 'rgba(255,60,60,0.4)');
+  bulletGlowEnemy.addColorStop(1, 'transparent');
+
+  bulletGlowNormal = ctx.createRadialGradient(0, 0, 0, 0, 0, 8);
+  bulletGlowNormal.addColorStop(0, 'rgba(100,200,255,0.4)');
+  bulletGlowNormal.addColorStop(1, 'transparent');
+
+  bulletGlowHoming = ctx.createRadialGradient(0, 0, 0, 0, 0, 8);
+  bulletGlowHoming.addColorStop(0, 'rgba(255,100,255,0.5)');
+  bulletGlowHoming.addColorStop(1, 'transparent');
+
+  bulletGlowDrone = ctx.createRadialGradient(0, 0, 0, 0, 0, 8);
+  bulletGlowDrone.addColorStop(0, 'rgba(100,255,200,0.5)');
+  bulletGlowDrone.addColorStop(1, 'transparent');
+
+  // Vignette
+  vignetteGrad = ctx.createRadialGradient(W / 2, H / 2, W * 0.3, W / 2, H / 2, W * 0.8);
+  vignetteGrad.addColorStop(0, 'rgba(0,0,0,0)');
+  vignetteGrad.addColorStop(1, 'rgba(0,0,0,0.3)');
+}
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  rebuildGradients();
+}
+resize();
+window.addEventListener('resize', resize);
+
+let mouse = { x: W / 2, y: H / 2, down: false };
+let rclickDown = false;
+window.addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+window.addEventListener('mousedown', e => {
+  if (e.button === 0) mouse.down = true;
+  if (e.button === 2) rclickDown = true;
+});
+window.addEventListener('mouseup', e => {
+  if (e.button === 0) mouse.down = false;
+  if (e.button === 2) rclickDown = false;
+});
+window.addEventListener('contextmenu', e => e.preventDefault());
+
+// --- Touch controls (mobile) ---
+let touchPos = { x: W / 2, y: H / 2 };
+let touchActive = false;
+let touchShooting = false;
+let isMobile = false;
+
+function updateMobileUI() {
+  if (isMobile && fireBtnEl) {
+    fireBtnEl.style.display = 'flex';
+    hintEl.style.fontSize = '12px';
+  }
+}
+
+window.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (!isMobile) {
+    isMobile = true;
+    updateMobileUI();
+  }
+  const touches = e.touches;
+  if (touches.length >= 2) {
+    // Two fingers = shoot
+    touchShooting = true;
+    // Also update aim from first finger
+    touchPos.x = touches[0].clientX;
+    touchPos.y = touches[0].clientY;
+    touchActive = true;
+  } else if (touches.length === 1) {
+    touchPos.x = touches[0].clientX;
+    touchPos.y = touches[0].clientY;
+    touchActive = true;
+  }
+  hideHintTouch();
+}, { passive: false });
+
+window.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const touches = e.touches;
+  if (touches.length >= 2) {
+    touchShooting = true;
+    touchPos.x = touches[0].clientX;
+    touchPos.y = touches[0].clientY;
+  } else if (touches.length === 1) {
+    touchPos.x = touches[0].clientX;
+    touchPos.y = touches[0].clientY;
+  }
+}, { passive: false });
+
+window.addEventListener('touchend', e => {
+  e.preventDefault();
+  const touches = e.touches;
+  if (touches.length >= 2) {
+    // Still shooting, update aim
+    touchPos.x = touches[0].clientX;
+    touchPos.y = touches[0].clientY;
+  } else if (touches.length === 1) {
+    touchPos.x = touches[0].clientX;
+    touchPos.y = touches[0].clientY;
+    touchShooting = false;
+  } else {
+    touchActive = false;
+    touchShooting = false;
+  }
+}, { passive: false });
+
+// Fire button for mobile
+let fireBtnEl = null;
+function createFireButton() {
+  fireBtnEl = document.createElement('div');
+  fireBtnEl.id = 'fire-btn';
+  fireBtnEl.textContent = '🔥';
+  fireBtnEl.style.cssText = `
+    position: fixed; bottom: 80px; right: 30px; width: 70px; height: 70px;
+    border-radius: 50%; background: rgba(255,60,60,0.35); border: 2px solid rgba(255,100,100,0.6);
+    display: none; align-items: center; justify-content: center; font-size: 32px;
+    user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent;
+    z-index: 100; touch-action: none;
+  `;
+  document.body.appendChild(fireBtnEl);
+
+  fireBtnEl.addEventListener('touchstart', e => { e.preventDefault(); touchShooting = true; fireBtnEl.style.background = 'rgba(255,60,60,0.7)'; }, { passive: false });
+  fireBtnEl.addEventListener('touchend', e => { e.preventDefault(); touchShooting = false; fireBtnEl.style.background = 'rgba(255,60,60,0.35)'; }, { passive: false });
+  fireBtnEl.addEventListener('touchcancel', e => { touchShooting = false; fireBtnEl.style.background = 'rgba(255,60,60,0.35)'; }, { passive: false });
+}
+createFireButton();
+
+let hintHidden = false;
+function hideHint() { if (!hintHidden) { hintHidden = true; hintEl.style.opacity = '0'; } }
+function hideHintTouch() { if (!hintHidden) { hintHidden = true; hintEl.style.opacity = '0'; } }
+window.addEventListener('mousemove', hideHint, { once: true });
+
+// --- Utility ---
+function lerp(a, b, t) { return a + (b - a) * t; }
+function lerpColor(a, b, t) {
+  return [Math.round(a[0]+(b[0]-a[0])*t), Math.round(a[1]+(b[1]-a[1])*t), Math.round(a[2]+(b[2]-a[2])*t)];
+}
+function angleDiff(a, b) {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function rand(min, max) { return min + Math.random() * (max - min); }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// --- Bonuses ---
+const bonusTypes = [
+  { emoji: '🔫', color: '#FF6347', ammo: 3, size: 24 },
+  { emoji: '💣', color: '#FFD700', ammo: 5, size: 26 },
+  { emoji: '❤️', color: '#FF69B4', ammo: 2, heal: 20, size: 24 },
+  { emoji: '⚡', color: '#00BFFF', ammo: 8, size: 26 },
+];
+
+// Special bonus — only for player: permanent homing missiles
+const homingBonusType = { emoji: '🚀', color: '#ff22ff', size: 30, special: true };
+
+// Special bonus — only for player: companion drone
+const droneBonusType = { emoji: '🛸', color: '#44ffaa', size: 28, special: true, drone: true };
+
+function spawnBonus() {
+  const type = bonusTypes[Math.floor(Math.random() * bonusTypes.length)];
+  bonuses.push({
+    x: 80 + Math.random() * (W - 160), y: 80 + Math.random() * (H - 160),
+    ...type, phase: Math.random() * Math.PI * 2, age: 0, maxLife: 600 + Math.floor(rand(0, 400)),
+  });
+}
+
+function spawnHomingBonus() {
+  bonuses.push({
+    x: 80 + Math.random() * (W - 160), y: 80 + Math.random() * (H - 160),
+    ...homingBonusType, phase: Math.random() * Math.PI * 2, age: 0, maxLife: 400 + Math.floor(rand(0, 200)),
+  });
+}
+
+function spawnDroneBonus() {
+  bonuses.push({
+    x: 80 + Math.random() * (W - 160), y: 80 + Math.random() * (H - 160),
+    ...droneBonusType, phase: Math.random() * Math.PI * 2, age: 0, maxLife: 350 + Math.floor(rand(0, 150)),
+  });
+}
+
+// --- Game state ---
+let plane, drone, bullets, enemyBullets, enemies, particles, bonuses, explosions, score, kills, gameAlive;
+let totalOffset = 0;
+let enemySpawnTimer = 0;
+let difficultyTimer = 0;
+let difficulty = 1;
+let uiFrameTimer = 0; // DOM update throttle
+let enemyIdCounter = 0; // unique IDs for homing missile target tracking
+// Wave system
+let waveActive = true;
+let waveTimer = 0;
+let waveCooldown = 0;
+let waveLabelTimer = 0;
+let waveLabelText = '';
+
+function initPlane() {
+  return {
+    x: W / 2, y: H / 2, angle: -Math.PI / 4,
+    speed: 0, bank: 0, trail: [],
+    ammo: 8, health: 100, maxHealth: 100,
+    shootCooldown: 0, invincible: 0,
+    mode: 'auto',
+    // Homing missiles
+    homingAmmo: 0,
+    // Auto-pilot state
+    aiPatrolAngle: Math.random() * Math.PI * 2,
+    aiPatrolTimer: 0,
+    aiTargetBonus: null,
+    aiAimTarget: null,
+    aiAimTimer: 0,
+    aiStrafeAngle: 0,
+    aiStrafeTimer: 0,
+    // Drone companion
+    hasDrone: false,
+  };
+}
+
+function startGame() {
+  plane = initPlane();
+  drone = null;
+  bullets = [];
+  enemyBullets = [];
+  enemies = [];
+  particles = [];
+  bonuses = [];
+  explosions = [];
+  score = 0;
+  kills = 0;
+  gameAlive = true;
+  totalOffset = 0;
+  enemySpawnTimer = 0;
+  difficultyTimer = 0;
+  difficulty = 1;
+  uiFrameTimer = 0;
+  enemyIdCounter = 0;
+  waveActive = true;
+  waveTimer = 0;
+  waveCooldown = 0;
+  waveLabelTimer = 0;
+  waveLabelText = '';
+  gameOverEl.style.display = 'none';
+  for (let i = 0; i < 10; i++) spawnBonus();
+  spawnHomingBonus();
+}
+
+startGame();
+function restartGame() { startGame(); }
+
+// --- Clouds ---
+const clouds = [];
+const cloudsFar = []; // layer 1 — pre-filtered, no per-frame filter()
+const cloudsNear = []; // layer 0 — pre-filtered
+for (let i = 0; i < 25; i++) {
+  const c = {
+    x: Math.random() * 3000 - 500, y: Math.random() * 2000 - 500,
+    w: 120 + Math.random() * 200, h: 40 + Math.random() * 60,
+    layer: Math.random() < 0.5 ? 0 : 1, opacity: 0.3 + Math.random() * 0.5,
+  };
+  clouds.push(c);
+  if (c.layer === 1) cloudsFar.push(c);
+  else cloudsNear.push(c);
+}
+
+// --- Mountains ---
+const mountains = [];
+for (let i = 0; i < 12; i++) {
+  mountains.push({ x: Math.random() * 4000 - 500, w: 200 + Math.random() * 300, h: 80 + Math.random() * 160, shade: 30 + Math.random() * 30 });
+}
+
+// --- Enemy AI ---
+const enemyTypes = {
+  scout: { speed: 2.2, health: 2, shootRate: 120, size: 18, color: '#cc3333', score: 10 },
+  fighter: { speed: 2.6, health: 4, shootRate: 80, size: 22, color: '#8844aa', score: 25 },
+  hunter: { speed: 1.8, health: 6, shootRate: 50, size: 26, color: '#226644', score: 40 },
+};
+
+function spawnEnemy() {
+  const types = ['scout'];
+  if (difficulty >= 2) types.push('fighter');
+  if (difficulty >= 3) types.push('hunter');
+  const type = types[Math.floor(Math.random() * types.length)];
+  const cfg = enemyTypes[type];
+  let x, y;
+  const side = Math.floor(Math.random() * 4);
+  if (side === 0) { x = -40; y = Math.random() * H; }
+  else if (side === 1) { x = W + 40; y = Math.random() * H; }
+  else if (side === 2) { x = Math.random() * W; y = -40; }
+  else { x = Math.random() * W; y = H + 40; }
+  enemies.push({
+    id: enemyIdCounter++,
+    x, y, angle: 0, speed: cfg.speed, health: cfg.health, maxHealth: cfg.health,
+    ammo: 0, shootRate: cfg.shootRate, shootTimer: Math.floor(rand(0, cfg.shootRate)),
+    size: cfg.size, color: cfg.color, score: cfg.score, type,
+    bank: 0, state: 'approach', stateTimer: 0,
+    strafeAngle: 0, strafeTimer: 0, trail: [],
+    aiTargetBonus: null, aiAimTimer: 0,
+    alive: true,
+  });
+}
+
+function updateEnemy(e) {
+  const d = dist(e, plane);
+  e.stateTimer++;
+
+  // --- Collect bonuses if no ammo ---
+  let wantBonus = null;
+  if (e.ammo <= 0) {
+    let bestB = null, bestBD = Infinity;
+    for (const b of bonuses) {
+      const bd = dist(e, b);
+      if (bd < 300 && bd < bestBD) { bestB = b; bestBD = bd; }
+    }
+    wantBonus = bestB;
+  }
+
+  // --- Choose target: drone (if closer) or player ---
+  let target = plane;
+  let targetDist = d;
+  if (drone) {
+    const dd = dist(e, drone);
+    if (dd < targetDist) { target = drone; targetDist = dd; }
+  }
+
+  // --- Smart shooting: aim first, then fire ---
+  const toTargetAngle = Math.atan2(target.y - e.y, target.x - e.x);
+  const aimError = Math.abs(angleDiff(e.angle, toTargetAngle));
+  const aimThreshold = 0.35; // radians — how close must we be to fire
+  e.aiAimTimer = (e.aiAimTimer || 0) + 1;
+
+  const canShoot = e.ammo > 0 && targetDist < 500 && aimError < aimThreshold && e.aiAimTimer > 20;
+
+  // --- Decide state ---
+  if (wantBonus && !canShoot) {
+    e.state = 'collect';
+  } else if (targetDist > 500) {
+    e.state = 'approach';
+  } else if (targetDist < 150) {
+    e.state = 'strafe';
+  } else {
+    e.state = 'engage';
+  }
+
+  const turnSpeed = e.type === 'hunter' ? 0.04 : e.type === 'fighter' ? 0.035 : 0.03;
+
+  if (e.state === 'collect') {
+    // Fly to bonus
+    const toBonus = angleDiff(e.angle, Math.atan2(wantBonus.y - e.y, wantBonus.x - e.x));
+    e.angle += toBonus * turnSpeed * 1.2;
+    e.bank = -toBonus * 1.5;
+    e.speed = lerp(e.speed, enemyTypes[e.type].speed * 1.1, 0.02);
+    e.aiAimTimer = 0;
+  } else if (e.state === 'approach') {
+    const toP = angleDiff(e.angle, toTargetAngle);
+    e.angle += toP * turnSpeed;
+    e.bank = -toP * 2;
+    e.speed = lerp(e.speed, enemyTypes[e.type].speed * 1.15, 0.02);
+    e.aiAimTimer++;
+  } else if (e.state === 'strafe') {
+    e.strafeTimer++;
+    if (e.strafeTimer > 90) { e.strafeAngle += (Math.random() - 0.5) * 2; e.strafeTimer = 0; }
+    const desiredAngle = toTargetAngle + e.strafeAngle + Math.PI / 2;
+    const da = angleDiff(e.angle, desiredAngle);
+    e.angle += da * turnSpeed * 0.8;
+    e.bank = -da * 1.5;
+    e.speed = lerp(e.speed, enemyTypes[e.type].speed * 0.8, 0.02);
+    e.aiAimTimer++;
+  } else {
+    // engage — aim at target, lead the shot
+    const leadX = target.x + Math.cos(target.angle) * target.speed * 12;
+    const leadY = target.y + Math.sin(target.angle) * target.speed * 12;
+    const toLead = angleDiff(e.angle, Math.atan2(leadY - e.y, leadX - e.x));
+    e.angle += toLead * turnSpeed;
+    e.bank = -toLead * 2;
+    e.speed = lerp(e.speed, enemyTypes[e.type].speed, 0.02);
+    e.aiAimTimer++;
+  }
+
+  // Move
+  e.x += Math.cos(e.angle) * e.speed;
+  e.y += Math.sin(e.angle) * e.speed;
+  e.bank *= 0.92;
+
+  // Shoot only when aimed and has ammo
+  if (canShoot) {
+    e.shootTimer--;
+    if (e.shootTimer <= 0) {
+      e.shootTimer = e.shootRate + Math.floor(rand(-15, 15));
+      e.ammo--;
+      const aimAngle = Math.atan2(target.y - e.y, target.x - e.x) + rand(-0.08, 0.08);
+      enemyBullets.push({
+        x: e.x + Math.cos(e.angle) * e.size, y: e.y + Math.sin(e.angle) * e.size,
+        vx: Math.cos(aimAngle) * 5, vy: Math.sin(aimAngle) * 5, life: 120,
+      });
+    }
+  } else {
+    e.shootTimer = e.shootRate; // reset when not aiming
+  }
+
+  // Collect bonuses (skip special homing bonus — player only)
+  for (let i = bonuses.length - 1; i >= 0; i--) {
+    const b = bonuses[i];
+    if (dist(e, b) < e.size + 15 && !b.special) {
+      e.ammo += b.ammo;
+      if (b.heal) e.health = Math.min(e.maxHealth, e.health + b.heal);
+      bonuses.splice(i, 1);
+      break;
+    }
+  }
+
+  e.trail.push({ x: e.x, y: e.y, age: 0 });
+  if (e.trail.length > 30) e.trail.shift();
+  e.trail.forEach(t => t.age++);
+
+  // Collision with player
+  if (d < e.size + 18 && plane.invincible <= 0) {
+    plane.health -= 25;
+    plane.invincible = 30;
+    emitExplosion(plane.x, plane.y, '#ff8844', 12);
+    const pushAngle = Math.atan2(e.y - plane.y, e.x - plane.x);
+    e.x += Math.cos(pushAngle) * 80;
+    e.y += Math.sin(pushAngle) * 80;
+  }
+
+  // Collision with drone
+  if (drone && dist(e, drone) < e.size + 14) {
+    drone.health--;
+    emitExplosion(drone.x, drone.y, '#44ffaa', 10);
+    const pushAngle = Math.atan2(e.y - drone.y, e.x - drone.x);
+    e.x += Math.cos(pushAngle) * 60;
+    e.y += Math.sin(pushAngle) * 60;
+    if (drone.health <= 0) {
+      emitExplosion(drone.x, drone.y, '#88ffcc', 20);
+      drone = null;
+      plane.hasDrone = false;
+    }
+  }
+}
+
+// --- Player AI (auto-pilot) ---
+function updatePlayerAI() {
+  if (plane.mode !== 'auto') return;
+
+  let targetAngle = null;
+  let targetSpeed = 3.5; // cruise speed — faster than any enemy
+
+  // Smart shooting state
+  plane.aiAimTarget = plane.aiAimTarget || null;
+  plane.aiAimTimer = plane.aiAimTimer || 0;
+
+  // --- Find best enemy to target ---
+  let bestEnemy = null, bestEnemyDist = Infinity;
+  for (const e of enemies) {
+    const d = dist(e, plane);
+    if (d < 450 && d < bestEnemyDist) { bestEnemy = e; bestEnemyDist = d; }
+  }
+
+  // --- Smart shoot check: are we aimed at the target? ---
+  const aimThreshold = 0.3; // radians — must be within ~17° of target
+  const homingThreshold = 0.8; // homing missiles need less precision (~45°)
+  let canShootNow = false;
+
+  const hasHoming = plane.homingAmmo > 0;
+  const threshold = hasHoming ? homingThreshold : aimThreshold;
+  const totalAmmo = plane.homingAmmo + plane.ammo;
+
+  if (bestEnemy && totalAmmo > 0 && plane.aiAimTimer > 10) {
+    const toEnemy = Math.atan2(bestEnemy.y - plane.y, bestEnemy.x - plane.x);
+    const aimError = Math.abs(angleDiff(plane.angle, toEnemy));
+    if (aimError < threshold) {
+      canShootNow = true;
+    }
+  }
+
+  // 1. Evasion — highest priority
+  let nearestBullet = null, nearestBulletDist = Infinity;
+  for (const b of enemyBullets) {
+    const d = dist(b, plane);
+    if (d < 180 && d < nearestBulletDist) { nearestBullet = b; nearestBulletDist = d; }
+  }
+
+  if (nearestBullet) {
+    const fleeAngle = Math.atan2(plane.y - nearestBullet.y, plane.x - nearestBullet.x);
+    targetAngle = fleeAngle;
+    targetSpeed = 6;
+    plane.aiAimTarget = null;
+    plane.aiAimTimer = 0;
+  }
+
+  // 2. Engage enemy — aim first, then shoot
+  if (bestEnemy && !targetAngle) {
+    const toEnemy = Math.atan2(bestEnemy.y - plane.y, bestEnemy.x - plane.x);
+
+    if (bestEnemyDist < 100) {
+      // Too close — back away
+      targetAngle = Math.atan2(plane.y - bestEnemy.y, plane.x - bestEnemy.x);
+      targetSpeed = 4;
+      plane.aiAimTarget = null;
+      plane.aiAimTimer = 0;
+    } else if (bestEnemyDist < 350) {
+      // Engage: fly toward enemy, strafe a bit for cover
+      plane.aiStrafeAngle = plane.aiStrafeAngle || 0;
+      plane.aiStrafeTimer = (plane.aiStrafeTimer || 0) + 1;
+      if (plane.aiStrafeTimer > 80) {
+        plane.aiStrafeAngle += rand(-0.8, 0.8);
+        plane.aiStrafeTimer = 0;
+      }
+      // Blend between facing enemy and strafing
+      const strafeTarget = toEnemy + plane.aiStrafeAngle * 0.5;
+      targetAngle = strafeTarget;
+      targetSpeed = 3;
+      plane.aiAimTarget = bestEnemy;
+      plane.aiAimTimer++;
+    } else {
+      // Medium range: approach enemy
+      targetAngle = toEnemy;
+      targetSpeed = 3.5;
+      plane.aiAimTarget = bestEnemy;
+      plane.aiAimTimer++;
+    }
+  } else if (!bestEnemy) {
+    plane.aiAimTarget = null;
+    plane.aiAimTimer = 0;
+  }
+
+  // 3. Collect bonuses — always chase homing bonus, others when needed
+  if (!targetAngle) {
+    // Always prioritize homing bonus
+    let homingBonus = null, homingBonusDist = Infinity;
+    for (const b of bonuses) {
+      const d = dist(b, plane);
+      if (b.special && d < 500 && d < homingBonusDist) { homingBonus = b; homingBonusDist = d; }
+    }
+    // Also look for drone bonus when no drone exists
+    let droneBonus = null, droneBonusDist = Infinity;
+    if (!drone) {
+      for (const b of bonuses) {
+        const d = dist(b, plane);
+        if (b.drone && d < 500 && d < droneBonusDist) { droneBonus = b; droneBonusDist = d; }
+      }
+    }
+    if (droneBonus) {
+      targetAngle = Math.atan2(droneBonus.y - plane.y, droneBonus.x - plane.x);
+      targetSpeed = 5.5;
+      plane.aiTargetBonus = droneBonus;
+    } else if (homingBonus) {
+      targetAngle = Math.atan2(homingBonus.y - plane.y, homingBonus.x - plane.x);
+      targetSpeed = 5.5;
+      plane.aiTargetBonus = homingBonus;
+    } else {
+      const totalAmmo = plane.homingAmmo + plane.ammo;
+      const needBonus = totalAmmo <= 2 || plane.health < plane.maxHealth * 0.5;
+      let bestBonus = null, bestBonusDist = Infinity;
+      for (const b of bonuses) {
+        const d = dist(b, plane);
+        if (d < 400 && d < bestBonusDist) { bestBonus = b; bestBonusDist = d; }
+      }
+      if (bestBonus && needBonus) {
+        targetAngle = Math.atan2(bestBonus.y - plane.y, bestBonus.x - plane.x);
+        targetSpeed = 5;
+        plane.aiTargetBonus = bestBonus;
+      } else {
+        plane.aiTargetBonus = null;
+      }
+    }
+  }
+
+  // 4. Patrol — gentle cruising
+  if (!targetAngle) {
+    plane.aiPatrolTimer++;
+    if (plane.aiPatrolTimer > 120) {
+      plane.aiPatrolAngle += rand(-0.8, 0.8);
+      plane.aiPatrolTimer = 0;
+    }
+    targetAngle = plane.aiPatrolAngle;
+    targetSpeed = 3.5;
+
+    const margin = 80;
+    if (plane.x < margin) targetAngle = 0;
+    if (plane.x > W - margin) targetAngle = Math.PI;
+    if (plane.y < margin) targetAngle = Math.PI / 2;
+    if (plane.y > H - margin) targetAngle = -Math.PI / 2;
+  }
+
+  // Apply steering
+  const angleDelta = angleDiff(plane.angle, targetAngle);
+  const turnRate = 0.05; // more agile than enemies (0.03-0.04)
+  plane.angle += angleDelta * turnRate;
+  plane.bank += (-angleDelta * 2 - plane.bank) * 0.08;
+  plane.speed = lerp(plane.speed, targetSpeed, 0.05); // faster acceleration
+
+  // Auto-shoot only when properly aimed
+  if (canShootNow) {
+    playerShoot();
+  }
+
+  plane._aiSpeed = targetSpeed;
+}
+
+// --- Drone companion AI ---
+function updateDrone() {
+  if (!drone) return;
+
+  const dPlayer = dist(drone, plane);
+  const turnSpeed = 0.06;
+  let targetAngle = null;
+  let targetSpeed = 3.5;
+
+  // Find nearest enemy to drone
+  let nearestEnemy = null, nearestEnemyDist = Infinity;
+  for (const e of enemies) {
+    const d = dist(e, drone);
+    if (d < 400 && d < nearestEnemyDist) { nearestEnemy = e; nearestEnemyDist = d; }
+  }
+
+  // Evasion — dodge enemy bullets
+  let nearestBullet = null, nearestBulletDist = Infinity;
+  for (const b of enemyBullets) {
+    const d = dist(b, drone);
+    if (d < 120 && d < nearestBulletDist) { nearestBullet = b; nearestBulletDist = d; }
+  }
+
+  if (nearestBullet) {
+    targetAngle = Math.atan2(drone.y - nearestBullet.y, drone.x - nearestBullet.x);
+    targetSpeed = 5.5;
+  }
+
+  // Engage enemy — attack from flank position
+  if (nearestEnemy && !targetAngle) {
+    if (nearestEnemyDist < 80) {
+      // Too close — back away
+      targetAngle = Math.atan2(drone.y - nearestEnemy.y, drone.x - nearestEnemy.x);
+      targetSpeed = 4.5;
+    } else if (nearestEnemyDist < 300) {
+      // Strafe around enemy, stay at medium range
+      drone._strafeAngle = drone._strafeAngle || 0;
+      drone._strafeTimer = (drone._strafeTimer || 0) + 1;
+      if (drone._strafeTimer > 60) {
+        drone._strafeAngle += rand(-1, 1);
+        drone._strafeTimer = 0;
+      }
+      const toEnemy = Math.atan2(nearestEnemy.y - drone.y, nearestEnemy.x - drone.x);
+      targetAngle = toEnemy + drone._strafeAngle * 0.6;
+      targetSpeed = 3;
+    } else {
+      // Approach
+      targetAngle = Math.atan2(nearestEnemy.y - drone.y, nearestEnemy.x - drone.x);
+      targetSpeed = 4;
+    }
+  }
+
+  // Stay near player — if too far, return
+  if (dPlayer > 250) {
+    targetAngle = Math.atan2(plane.y - drone.y, plane.x - drone.x);
+    targetSpeed = 5;
+  }
+
+  // Default: orbit around player
+  if (!targetAngle) {
+    drone._orbitAngle = (drone._orbitAngle || 0) + 0.02;
+    const orbitRadius = 80;
+    const orbitX = plane.x + Math.cos(drone._orbitAngle) * orbitRadius;
+    const orbitY = plane.y + Math.sin(drone._orbitAngle) * orbitRadius;
+    targetAngle = Math.atan2(orbitY - drone.y, orbitX - drone.x);
+    targetSpeed = 2.5;
+  }
+
+  // Apply steering
+  const angleDelta = angleDiff(drone.angle, targetAngle);
+  drone.angle += angleDelta * turnSpeed;
+  drone.bank += (-angleDelta * 1.5 - drone.bank) * 0.1;
+  drone.speed = lerp(drone.speed, targetSpeed, 0.05);
+
+  // Move
+  drone.x += Math.cos(drone.angle) * drone.speed;
+  drone.y += Math.sin(drone.angle) * drone.speed;
+  drone.bank *= 0.9;
+
+  // Wrap
+  const margin = 50;
+  if (drone.x < -margin) drone.x = W + margin;
+  if (drone.x > W + margin) drone.x = -margin;
+  if (drone.y < -margin) drone.y = H + margin;
+  if (drone.y > H + margin) drone.y = -margin;
+
+  // Auto-shoot at enemies
+  if (drone.ammo > 0 && nearestEnemy && nearestEnemyDist < 350) {
+    drone.shootCooldown--;
+    if (drone.shootCooldown <= 0) {
+      const toEnemy = Math.atan2(nearestEnemy.y - drone.y, nearestEnemy.x - drone.x);
+      const aimError = Math.abs(angleDiff(drone.angle, toEnemy));
+      if (aimError < 0.5) {
+        drone.shootCooldown = 25;
+        drone.ammo--;
+        const muzzle = { x: drone.x + Math.cos(drone.angle) * 14, y: drone.y + Math.sin(drone.angle) * 14 };
+        const spread = 0.08;
+        bullets.push({
+          x: muzzle.x, y: muzzle.y,
+          vx: Math.cos(toEnemy + rand(-spread, spread)) * 8,
+          vy: Math.sin(toEnemy + rand(-spread, spread)) * 8,
+          life: 100,
+          homing: false,
+          homingTarget: null,
+          drone: true,
+        });
+        emitParticle(muzzle.x, muzzle.y, (Math.random()-0.5)*2, (Math.random()-0.5)*2, 5, '#88ffcc', 3);
+      }
+    }
+  }
+
+  // Trail
+  drone.trail.push({ x: drone.x, y: drone.y, age: 0 });
+  if (drone.trail.length > 25) drone.trail.shift();
+  drone.trail.forEach(t => t.age++);
+
+  // Engine trail
+  if (drone.speed > 1) {
+    emitEngineTrail(drone.x, drone.y, drone.angle, drone.speed * 0.5);
+  }
+}
+
+// --- Particles ---
+function emitParticle(x, y, vx, vy, life, color, size) {
+  particles.push({ x, y, vx, vy, life, maxLife: life, color, size });
+}
+
+function emitExplosion(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 1 + Math.random() * 4;
+    emitParticle(x, y, Math.cos(a) * s, Math.sin(a) * s, 30 + Math.random() * 25, color, 2 + Math.random() * 4);
+  }
+}
+
+function emitEngineTrail(x, y, angle, speed) {
+  const back = { x: x - Math.cos(angle) * 18, y: y - Math.sin(angle) * 18 };
+  emitParticle(
+    back.x + (Math.random() - 0.5) * 5, back.y + (Math.random() - 0.5) * 5,
+    -Math.cos(angle) * (0.3 + Math.random()) + (Math.random() - 0.5) * 0.3,
+    -Math.sin(angle) * (0.3 + Math.random()) + (Math.random() - 0.5) * 0.3,
+    15 + Math.random() * 12, '#ffaa44', 1 + Math.random() * 2
+  );
+}
+
+function emitCollectParticles(x, y, color) {
+  for (let i = 0; i < 12; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const s = 1 + Math.random() * 3;
+    emitParticle(x, y, Math.cos(a) * s, Math.sin(a) * s, 30 + Math.random() * 15, color, 2 + Math.random() * 2);
+  }
+}
+
+// --- Shooting ---
+function playerShoot() {
+  const totalAmmo = plane.homingAmmo + plane.ammo;
+  if (totalAmmo <= 0 || plane.shootCooldown > 0) return;
+  // Homing ammo fires first
+  const isHoming = plane.homingAmmo > 0;
+  if (isHoming) plane.homingAmmo--; else plane.ammo--;
+  plane.shootCooldown = 10;
+  const muzzle = { x: plane.x + Math.cos(plane.angle) * 24, y: plane.y + Math.sin(plane.angle) * 24 };
+  const spread = 0.05;
+  bullets.push({
+    x: muzzle.x, y: muzzle.y,
+    vx: Math.cos(plane.angle + rand(-spread, spread)) * 9,
+    vy: Math.sin(plane.angle + rand(-spread, spread)) * 9,
+    life: 120,
+    homing: isHoming,
+    homingTarget: null,
+  });
+  const flashColor = isHoming ? '#ff88ff' : '#ffff88';
+  emitParticle(muzzle.x, muzzle.y, (Math.random()-0.5)*2, (Math.random()-0.5)*2, 5, flashColor, isHoming ? 5 : 4);
+}
+
+// --- Drawing ---
+function drawPlaneShape(c, color, size, isEnemy) {
+  c.fillStyle = color;
+  c.beginPath();
+  if (!isEnemy) {
+    c.moveTo(size, 0);
+    c.lineTo(size * 0.25, -size * 0.3);
+    c.lineTo(-size * 0.3, -size);
+    c.lineTo(-size * 0.4, -size * 0.3);
+    c.lineTo(-size * 0.9, -size * 0.5);
+    c.lineTo(-size * 0.8, -size * 0.15);
+    c.lineTo(-size * 0.8, 0);
+    c.lineTo(-size * 0.8, size * 0.15);
+    c.lineTo(-size * 0.9, size * 0.5);
+    c.lineTo(-size * 0.4, size * 0.3);
+    c.lineTo(-size * 0.3, size);
+    c.lineTo(size * 0.25, size * 0.3);
+  } else {
+    c.moveTo(size, 0);
+    c.lineTo(size * 0.2, -size * 0.25);
+    c.lineTo(-size * 0.2, -size * 0.9);
+    c.lineTo(-size * 0.5, -size * 0.85);
+    c.lineTo(-size * 0.45, -size * 0.25);
+    c.lineTo(-size * 0.85, -size * 0.4);
+    c.lineTo(-size * 0.75, 0);
+    c.lineTo(-size * 0.85, size * 0.4);
+    c.lineTo(-size * 0.45, size * 0.25);
+    c.lineTo(-size * 0.5, size * 0.85);
+    c.lineTo(-size * 0.2, size * 0.9);
+    c.lineTo(size * 0.2, size * 0.25);
+  }
+  c.closePath();
+  c.fill();
+}
+
+function drawPlayer() {
+  ctx.save();
+  ctx.translate(plane.x, plane.y);
+  ctx.rotate(plane.angle);
+
+  if (plane.invincible > 0 && Math.floor(plane.invincible / 3) % 2) {
+    ctx.globalAlpha = 0.4;
+  }
+
+  // Shadow
+  ctx.save();
+  ctx.translate(3, 5);
+  ctx.scale(1, Math.cos(plane.bank * 0.6));
+  ctx.globalAlpha = 0.2;
+  drawPlaneShape(ctx, '#000', 24, false);
+  ctx.restore();
+
+  ctx.scale(1, Math.cos(plane.bank * 0.6));
+  ctx.globalAlpha = 1;
+
+  // Color based on mode
+  const bodyColor = plane.mode === 'manual' ? '#ffdd88' : '#e8f0ff';
+  drawPlaneShape(ctx, bodyColor, 24, false);
+
+  // Cockpit
+  const cockpitGlow = 0.5 + Math.sin(Date.now() * 0.005) * 0.2;
+  ctx.globalAlpha = cockpitGlow;
+  ctx.fillStyle = plane.mode === 'manual' ? '#ffaa44' : '#88ccff';
+  ctx.beginPath();
+  ctx.ellipse(10, 0, 5, 3, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Engine glow when boosting
+  const isBoosting = plane.mode === 'manual' && (mouse.down || touchActive);
+  if (isBoosting && plane.speed > 2) {
+    const gs = 8 + plane.speed * 2 + Math.random() * 4;
+    const g = ctx.createRadialGradient(-20, 0, 0, -20, 0, gs);
+    g.addColorStop(0, 'rgba(255,200,100,0.8)');
+    g.addColorStop(0.5, 'rgba(255,100,50,0.4)');
+    g.addColorStop(1, 'rgba(255,50,20,0)');
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(-20, 0, gs, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // Health bar
+  if (plane.health < plane.maxHealth) {
+    const bw = 40, bh = 4;
+    const bx = plane.x - bw / 2, by = plane.y - 35;
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(bx, by, bw, bh);
+    const hp = plane.health / plane.maxHealth;
+    ctx.fillStyle = hp > 0.5 ? '#44dd44' : hp > 0.25 ? '#ddaa22' : '#dd3333';
+    ctx.fillRect(bx, by, bw * hp, bh);
+  }
+
+  // AI indicator ring
+  if (plane.mode === 'auto') {
+    const pulse = 28 + Math.sin(Date.now() * 0.004) * 4;
+    const isAiming = plane.aiAimTarget && plane.aiAimTimer > 15 && plane.ammo > 0;
+    ctx.globalAlpha = isAiming ? 0.5 : 0.2;
+    ctx.strokeStyle = isAiming ? '#ff8844' : '#88ccff';
+    ctx.lineWidth = isAiming ? 2 : 1.5;
+    ctx.setLineDash([4, 6]);
+    ctx.beginPath();
+    ctx.arc(plane.x, plane.y, pulse, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw aim line to target
+    if (isAiming && plane.aiAimTarget) {
+      ctx.globalAlpha = 0.25;
+      ctx.strokeStyle = '#ff8844';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 8]);
+      ctx.beginPath();
+      ctx.moveTo(plane.x, plane.y);
+      ctx.lineTo(plane.aiAimTarget.x, plane.aiAimTarget.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Homing missile indicator
+  if (plane.homingAmmo > 0) {
+    const homingPulse = 32 + Math.sin(Date.now() * 0.008) * 5;
+    ctx.globalAlpha = 0.4 + Math.sin(Date.now() * 0.006) * 0.2;
+    ctx.strokeStyle = '#ff88ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.arc(plane.x, plane.y, homingPulse, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawDrone() {
+  if (!drone) return;
+
+  ctx.save();
+  ctx.translate(drone.x, drone.y);
+  ctx.rotate(drone.angle);
+  ctx.scale(1, Math.cos(drone.bank * 0.5));
+
+  // Shadow
+  ctx.save();
+  ctx.translate(2, 3);
+  ctx.globalAlpha = 0.2;
+  drawPlaneShape(ctx, '#000', 16, false);
+  ctx.restore();
+
+  ctx.globalAlpha = 1;
+
+  // Drone body — smaller than player, teal/green tint
+  drawPlaneShape(ctx, '#88eedd', 16, false);
+
+  // Cockpit glow
+  const glow = 0.5 + Math.sin(Date.now() * 0.006) * 0.2;
+  ctx.globalAlpha = glow;
+  ctx.fillStyle = '#44ffaa';
+  ctx.beginPath();
+  ctx.ellipse(6, 0, 4, 2.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+
+  // Drone indicator ring
+  const pulse = 20 + Math.sin(Date.now() * 0.005) * 3;
+  ctx.globalAlpha = 0.3;
+  ctx.strokeStyle = '#44ffaa';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([3, 5]);
+  ctx.beginPath();
+  ctx.arc(drone.x, drone.y, pulse, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+
+  // Health bar (drone has 3 HP)
+  if (drone.health < 3) {
+    const bw = 24, bh = 3;
+    const bx = drone.x - bw / 2, by = drone.y - 24;
+    ctx.fillStyle = 'rgba(0,0,0,0.4)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = '#44ffaa';
+    ctx.fillRect(bx, by, bw * (drone.health / 3), bh);
+  }
+
+  // Ammo indicator
+  if (drone.ammo > 0) {
+    ctx.font = 'bold 10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(100,255,200,0.8)';
+    ctx.fillText(`🔫${drone.ammo}`, drone.x, drone.y - 26);
+  }
+
+  // Trail
+  if (drone.trail.length > 2 && drone.speed > 2) {
+    ctx.globalAlpha = 0.1;
+    ctx.strokeStyle = '#88ffcc';
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(drone.trail[0].x, drone.trail[0].y);
+    for (let i = 1; i < drone.trail.length; i++) ctx.lineTo(drone.trail[i].x, drone.trail[i].y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Link line to player
+  const dPlayer = dist(drone, plane);
+  if (dPlayer < 200) {
+    ctx.globalAlpha = 0.15 * (1 - dPlayer / 200);
+    ctx.strokeStyle = '#44ffaa';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 6]);
+    ctx.beginPath();
+    ctx.moveTo(drone.x, drone.y);
+    ctx.lineTo(plane.x, plane.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawEnemy(e) {
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.rotate(e.angle);
+  ctx.scale(1, Math.cos(e.bank * 0.5));
+
+  ctx.save();
+  ctx.translate(2, 4);
+  ctx.globalAlpha = 0.2;
+  drawPlaneShape(ctx, '#000', e.size, true);
+  ctx.restore();
+
+  ctx.globalAlpha = 1;
+  drawPlaneShape(ctx, e.color, e.size, true);
+
+  ctx.fillStyle = '#ff4444';
+  ctx.globalAlpha = 0.6 + Math.sin(Date.now() * 0.008) * 0.2;
+  ctx.beginPath();
+  ctx.ellipse(e.size * 0.35, 0, e.size * 0.15, e.size * 0.1, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Health bar
+  if (e.health < e.maxHealth) {
+    const bw = e.size * 1.5, bh = 3;
+    const bx = e.x - bw / 2, by = e.y - e.size - 12;
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(bx, by, bw * (e.health / e.maxHealth), bh);
+  }
+
+  // Ammo count
+  ctx.font = 'bold 11px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'bottom';
+  const ammoY = e.health < e.maxHealth ? e.y - e.size - 16 : e.y - e.size - 12;
+  if (e.ammo > 0) {
+    ctx.fillStyle = 'rgba(255,220,100,0.9)';
+  } else {
+    ctx.fillStyle = 'rgba(255,100,100,0.7)';
+  }
+  ctx.fillText(`🔫${e.ammo}`, e.x, ammoY);
+
+  // Aiming indicator when enemy is lined up
+  if (e.aiAimTimer > 20 && e.ammo > 0) {
+    const aimError = Math.abs(angleDiff(e.angle, Math.atan2(plane.y - e.y, plane.x - e.x)));
+    if (aimError < 0.4) {
+      ctx.globalAlpha = 0.5 + Math.sin(Date.now() * 0.01) * 0.3;
+      ctx.strokeStyle = '#ff4444';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, e.size + 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  if (e.trail.length > 2) {
+    ctx.globalAlpha = 0.12;
+    ctx.strokeStyle = '#ff6644';
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(e.trail[0].x, e.trail[0].y);
+    for (let i = 1; i < e.trail.length; i++) ctx.lineTo(e.trail[i].x, e.trail[i].y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawBullet(b, color, glowGrad) {
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.fillStyle = glowGrad;
+  ctx.beginPath();
+  ctx.arc(0, 0, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(0, 0, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawCloud(cloud, parallax) {
+  const px = cloud.x - parallax * (cloud.layer === 0 ? 0.2 : 0.5);
+  const py = cloud.y - parallax * (cloud.layer === 0 ? 0.1 : 0.3);
+  const wx = ((px % (W + 600)) + W + 600) % (W + 600) - 300;
+  const wy = ((py % (H + 400)) + H + 400) % (H + 400) - 200;
+  ctx.globalAlpha = cloud.opacity;
+  ctx.fillStyle = '#fff';
+  const cx = wx, cy = wy, w = cloud.w, h = cloud.h;
+  ctx.beginPath(); ctx.ellipse(cx, cy, w * 0.5, h * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(cx - w * 0.25, cy + h * 0.1, w * 0.35, h * 0.35, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(cx + w * 0.25, cy - h * 0.05, w * 0.3, h * 0.3, 0, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawMountain(m, offset) {
+  const mx = ((m.x + offset) % (W + 600) + W + 600) % (W + 600) - 300;
+  const baseY = H + 20;
+  const shade = m.shade;
+  ctx.fillStyle = `rgb(${shade},${shade + 20},${shade + 35})`;
+  ctx.beginPath();
+  ctx.moveTo(mx - m.w / 2, baseY);
+  ctx.lineTo(mx - m.w * 0.1, baseY - m.h);
+  ctx.lineTo(mx + m.w * 0.05, baseY - m.h * 0.7);
+  ctx.lineTo(mx + m.w * 0.15, baseY - m.h * 0.95);
+  ctx.lineTo(mx + m.w / 2, baseY);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawBonus(b, time) {
+  const bob = Math.sin(time * 0.003 + b.phase) * 6;
+  const pulse = 1 + Math.sin(time * 0.005 + b.phase) * 0.15;
+  const fadeIn = Math.min(b.age / 30, 1);
+  const fadeOut = Math.max((b.maxLife - b.age) / 60, 0);
+  const alpha = fadeIn * (1 - fadeOut);
+  ctx.save();
+  ctx.translate(b.x, b.y + bob);
+  ctx.scale(pulse, pulse);
+  ctx.globalAlpha = alpha;
+  const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, b.size * 1.5);
+  glow.addColorStop(0, b.color + '40');
+  glow.addColorStop(1, b.color + '00');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 0, b.size * 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.font = `${b.size}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(b.emoji, 0, 0);
+  ctx.restore();
+}
+
+function drawCursor(time) {
+  const cx = touchActive ? touchPos.x : mouse.x;
+  const cy = touchActive ? touchPos.y : mouse.y;
+  const pulse = 10 + Math.sin(time * 0.006) * 3;
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.globalAlpha = 0.5;
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, pulse, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 0.8;
+  ctx.beginPath();
+  ctx.arc(0, 0, 2, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  ctx.restore();
+
+  // Draw aim line when in manual mode
+  if (plane.mode === 'manual') {
+    ctx.globalAlpha = 0.3;
+    ctx.strokeStyle = '#ffdd88';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 6]);
+    ctx.beginPath();
+    ctx.moveTo(plane.x, plane.y);
+    ctx.lineTo(cx, cy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawExplosion(ex) {
+  const progress = ex.age / ex.maxLife;
+  const alpha = 1 - progress;
+  const radius = ex.radius * (0.5 + progress * 0.5);
+  ctx.save();
+  ctx.globalAlpha = alpha * 0.6;
+  const g = ctx.createRadialGradient(ex.x, ex.y, 0, ex.x, ex.y, radius);
+  g.addColorStop(0, '#ffff88');
+  g.addColorStop(0.3, '#ff8844');
+  g.addColorStop(0.7, '#ff4422');
+  g.addColorStop(1, 'transparent');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(ex.x, ex.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+let damageFlash = 0;
+
+// --- Main loop ---
+let lastTime = 0;
+
+function update(dt) {
+  if (!gameAlive) return;
+
+  // Mode switching — mouse (desktop) or touch (mobile)
+  const aimX = touchActive ? touchPos.x : mouse.x;
+  const aimY = touchActive ? touchPos.y : mouse.y;
+  const isAiming = mouse.down || touchActive;
+  const isShooting = rclickDown || touchShooting;
+
+  if (isAiming) {
+    plane.mode = 'manual';
+    // Fly toward cursor/touch at high speed
+    const targetAngle = Math.atan2(aimY - plane.y, aimX - plane.x);
+    const angleDelta = angleDiff(plane.angle, targetAngle);
+    plane.angle += angleDelta * 0.07;
+    plane.bank += (-angleDelta * 2 - plane.bank) * 0.08;
+    plane.speed = lerp(plane.speed, 8, 0.06);
+  } else {
+    plane.mode = 'auto';
+    updatePlayerAI();
+  }
+
+  // Manual shooting (right click on desktop, two-finger or fire button on mobile)
+  if (isShooting) playerShoot();
+
+  // Move
+  plane.x += Math.cos(plane.angle) * plane.speed;
+  plane.y += Math.sin(plane.angle) * plane.speed;
+
+  // Wrap
+  const margin = 50;
+  if (plane.x < -margin) plane.x = W + margin;
+  if (plane.x > W + margin) plane.x = -margin;
+  if (plane.y < -margin) plane.y = H + margin;
+  if (plane.y > H + margin) plane.y = -margin;
+
+  // Trail
+  plane.trail.push({ x: plane.x, y: plane.y, age: 0 });
+  if (plane.trail.length > 50) plane.trail.shift();
+  plane.trail.forEach(p => p.age++);
+
+  // Engine trail
+  if (plane.speed > 1) {
+    emitEngineTrail(plane.x, plane.y, plane.angle, plane.speed);
+    if (plane.mode === 'manual') emitEngineTrail(plane.x, plane.y, plane.angle, plane.speed);
+  }
+
+  // Cooldowns
+  if (plane.shootCooldown > 0) plane.shootCooldown--;
+  if (plane.invincible > 0) plane.invincible--;
+
+  // Drone companion update
+  if (drone) {
+    updateDrone();
+  }
+
+  // Update bullets
+  bullets = bullets.filter(b => {
+    // Homing logic
+    if (b.homing) {
+      // Find or keep target
+      if (!b.homingTarget || !b.homingTarget.alive || dist(b, b.homingTarget) > 600) {
+        let best = null, bestD = 600;
+        for (const e of enemies) {
+          const d = dist(b, e);
+          if (d < bestD) { best = e; bestD = d; }
+        }
+        b.homingTarget = best;
+      }
+      if (b.homingTarget) {
+        // Steer toward target
+        const currentAngle = Math.atan2(b.vy, b.vx);
+        const targetAngle = Math.atan2(b.homingTarget.y - b.y, b.homingTarget.x - b.x);
+        const steer = angleDiff(currentAngle, targetAngle);
+        const turnRate = 0.12; // how fast the missile can turn
+        const newAngle = currentAngle + clamp(steer, -turnRate, turnRate);
+        const speed = Math.hypot(b.vx, b.vy);
+        b.vx = Math.cos(newAngle) * (speed + 0.15); // slight acceleration
+        b.vy = Math.sin(newAngle) * (speed + 0.15);
+        // Trail
+        emitParticle(b.x, b.y, (Math.random()-0.5)*0.5, (Math.random()-0.5)*0.5, 10, '#ff44ff', 2);
+      }
+    }
+    b.x += b.vx; b.y += b.vy; b.life--;
+    return b.life > 0 && b.x > -50 && b.x < W + 50 && b.y > -50 && b.y < H + 50;
+  });
+
+  enemyBullets = enemyBullets.filter(b => {
+    b.x += b.vx; b.y += b.vy; b.life--;
+    return b.life > 0 && b.x > -50 && b.x < W + 50 && b.y > -50 && b.y < H + 50;
+  });
+
+  // Enemy bullets hit player
+  if (plane.invincible <= 0) {
+    enemyBullets = enemyBullets.filter(b => {
+      if (dist(b, plane) < 18) {
+        plane.health -= 10;
+        plane.invincible = 20;
+        damageFlash = 10;
+        emitExplosion(plane.x, plane.y, '#ff4444', 8);
+        return false;
+      }
+      return true;
+    });
+  }
+
+  // Enemy bullets hit drone
+  enemyBullets = enemyBullets.filter(b => {
+    if (drone && dist(b, drone) < 14) {
+      drone.health--;
+      emitExplosion(drone.x, drone.y, '#44ffaa', 8);
+      if (drone.health <= 0) {
+        emitExplosion(drone.x, drone.y, '#88ffcc', 20);
+        drone = null;
+        plane.hasDrone = false;
+      }
+      return false;
+    }
+    return true;
+  });
+
+  // Player bullets hit enemies
+  bullets = bullets.filter(b => {
+    for (let i = enemies.length - 1; i >= 0; i--) {
+      const e = enemies[i];
+      if (dist(b, e) < e.size + 5) {
+        e.health--;
+        emitParticle(b.x, b.y, (Math.random()-0.5)*3, (Math.random()-0.5)*3, 15, '#ffaa44', 3);
+        if (e.health <= 0) {
+          e.alive = false; // homing missiles check this instead of O(N) array.includes
+          emitExplosion(e.x, e.y, e.color, 25);
+          score += e.score;
+          kills++;
+          if (Math.random() < 0.4) {
+            const bt = bonusTypes[Math.floor(Math.random() * 2)];
+            bonuses.push({ x: e.x, y: e.y, ...bt, phase: Math.random() * Math.PI * 2, age: 0, maxLife: 500 });
+          }
+          enemies.splice(i, 1);
+        }
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // Update enemies — wave system
+  enemySpawnTimer++;
+  difficultyTimer++;
+  if (difficultyTimer > 1200) { difficultyTimer = 0; difficulty = Math.min(difficulty + 1, 6); }
+
+  // Wave cycle: active phase → cooldown → repeat
+  waveTimer++;
+  if (waveActive) {
+    const waveDuration = 700 + difficulty * 80; // ~12-20s of spawning
+    if (waveTimer > waveDuration) {
+      waveActive = false;
+      waveTimer = 0;
+      waveCooldown = 800 + Math.floor(rand(0, 400)); // ~13-20s break
+      waveLabelText = '⏸ Пауза';
+      waveLabelTimer = 180;
+    }
+  } else {
+    waveCooldown--;
+    if (waveCooldown <= 0) {
+      waveActive = true;
+      waveTimer = 0;
+      waveLabelText = `⚔ Волна ${difficulty}`;
+      waveLabelTimer = 180;
+    }
+  }
+
+  // Spawn only during active waves
+  if (waveActive) {
+    const spawnInterval = Math.max(60, 200 - difficulty * 25);
+    const maxEnemies = 3 + difficulty;
+    if (enemySpawnTimer > spawnInterval && enemies.length < maxEnemies) {
+      enemySpawnTimer = 0;
+      spawnEnemy();
+    }
+  }
+  enemies.forEach(e => updateEnemy(e));
+  enemies = enemies.filter(e => {
+    if (e.x < -300 || e.x > W + 300 || e.y < -300 || e.y > H + 300) return false;
+    return true;
+  });
+
+  // Wave label countdown
+  if (waveLabelTimer > 0) waveLabelTimer--;
+
+  // Particles — hard cap to prevent memory blowup
+  const MAX_PARTICLES = 1200;
+  particles = particles.filter(p => {
+    p.x += p.vx; p.y += p.vy; p.vx *= 0.96; p.vy *= 0.96; p.life--;
+    return p.life > 0;
+  });
+  if (particles.length > MAX_PARTICLES) {
+    particles.length = MAX_PARTICLES; // drop oldest
+  }
+
+  // Explosions
+  explosions = explosions.filter(ex => { ex.age++; return ex.age < ex.maxLife; });
+
+  // Bonuses
+  bonuses.forEach(b => b.age++);
+  for (let i = bonuses.length - 1; i >= 0; i--) {
+    const b = bonuses[i];
+    const collectRadius = b.special ? 45 : 35;
+    if (dist(plane, b) < collectRadius) {
+      if (b.drone) {
+        // Drone bonus — spawn companion drone (only one at a time)
+        if (!drone) {
+          drone = {
+            x: plane.x + 60, y: plane.y, angle: plane.angle,
+            speed: 3, bank: 0, health: 3, ammo: plane.ammo > 0 ? Math.min(5, plane.ammo) : 3,
+            shootCooldown: 0, trail: [],
+            _orbitAngle: Math.atan2(plane.y - (plane.y), plane.x - (plane.x + 60)),
+          };
+          plane.hasDrone = true;
+          plane.ammo = Math.max(0, plane.ammo - Math.min(5, plane.ammo));
+          emitCollectParticles(b.x, b.y, b.color);
+          emitCollectParticles(b.x, b.y, '#ffffff');
+          emitCollectParticles(b.x, b.y, '#88ffcc');
+        }
+      } else if (b.special) {
+        // Convert all current regular ammo to homing missiles
+        plane.homingAmmo += plane.ammo;
+        plane.ammo = 0;
+        emitCollectParticles(b.x, b.y, b.color);
+        emitCollectParticles(b.x, b.y, '#ffffff');
+        emitCollectParticles(b.x, b.y, '#ff88ff');
+      } else {
+        // Regular ammo bonus — always gives regular ammo
+        plane.ammo += b.ammo;
+        if (b.heal) plane.health = Math.min(plane.maxHealth, plane.health + b.heal);
+        emitCollectParticles(b.x, b.y, b.color);
+      }
+      bonuses.splice(i, 1);
+    } else if (b.age > b.maxLife) {
+      bonuses.splice(i, 1);
+    }
+  }
+  if (bonuses.length < 8 && Math.random() < 0.015) spawnBonus();
+  // Homing bonus spawn — cap to prevent accumulation
+  const homingCount = bonuses.filter(b => b.special && !b.drone).length;
+  if (homingCount < 2 && Math.random() < 0.004) spawnHomingBonus();
+  // Drone bonus spawn — very rare, only when no drone exists, capped at 1
+  const droneCount = bonuses.filter(b => b.drone).length;
+  if (!drone && droneCount < 1 && Math.random() < 0.003) spawnDroneBonus();
+
+  totalOffset += plane.speed * 0.5;
+  if (damageFlash > 0) damageFlash--;
+
+  // Game over
+  if (plane.health <= 0) {
+    gameAlive = false;
+    emitExplosion(plane.x, plane.y, '#ff8844', 40);
+    emitExplosion(plane.x, plane.y, '#ffffff', 20);
+    goStats.textContent = `Счёт: ${score} · Сбито врагов: ${kills}`;
+    setTimeout(() => { gameOverEl.style.display = 'flex'; }, 800);
+  }
+
+  // UI — batched every 6 frames (~100ms) to avoid per-frame DOM thrashing
+  if (!uiFrameTimer) uiFrameTimer = 0;
+  uiFrameTimer++;
+  if (uiFrameTimer >= 6) {
+    uiFrameTimer = 0;
+
+    if (plane.homingAmmo > 0) {
+      ammoEl.textContent = `🚀 ${plane.homingAmmo} · 🔫 ${plane.ammo}`;
+      ammoEl.style.color = '#ff88ff';
+    } else {
+      ammoEl.textContent = `🔫 ${plane.ammo}`;
+      ammoEl.style.color = '#fff';
+    }
+    const speedKm = Math.round(plane.speed * 60);
+    speedEl.textContent = plane.mode === 'manual' ? `⚡ ${speedKm} км/ч` : `~ ${speedKm} км/ч`;
+    killsEl.textContent = `☠ ${kills} · ★ ${score}`;
+    const hp = Math.max(0, plane.health / plane.maxHealth);
+    healthFill.style.width = `${hp * 100}%`;
+    if (hp > 0.5) healthFill.style.background = 'linear-gradient(90deg, #44dd44, #66ff66)';
+    else if (hp > 0.25) healthFill.style.background = 'linear-gradient(90deg, #ddaa22, #ffcc44)';
+    else healthFill.style.background = 'linear-gradient(90deg, #dd3333, #ff5555)';
+
+    // Mode label
+    let modeText = '';
+    let modeBg = '';
+    let modeColor = '';
+    if (plane.homingAmmo > 0) {
+      modeText = '🚀 САМОНАВОДЯЩИЕСЯ';
+      modeBg = 'rgba(255,100,255,0.25)';
+      modeColor = '#ff88ff';
+    } else if (plane.mode === 'auto') {
+      modeText = '🤖 АВТОПИЛОТ';
+      modeBg = 'rgba(100,200,255,0.2)';
+      modeColor = '#88ccff';
+    } else {
+      modeText = '👤 РУЧНОЕ';
+      modeBg = 'rgba(255,200,100,0.2)';
+      modeColor = '#ffdd88';
+    }
+    if (drone) {
+      modeText += ` · 🛸 ДРОН`;
+      if (!modeBg.includes('255,100,255')) {
+        modeBg = 'rgba(68,255,170,0.2)';
+        modeColor = '#44ffaa';
+      }
+    }
+    modeLabel.textContent = modeText;
+    modeLabel.style.background = modeBg;
+    modeLabel.style.color = modeColor;
+  }
+}
+
+function draw(time) {
+  const t = Math.min(plane ? plane.speed / 8 : 0, 1);
+  const top = lerpColor([72, 149, 226], [25, 42, 90], t);
+  const bot = lerpColor([173, 216, 230], [100, 149, 180], t);
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, `rgb(${top.join(',')})`);
+  grad.addColorStop(1, `rgb(${bot.join(',')})`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  mountains.forEach(m => drawMountain(m, -totalOffset * 0.3));
+  cloudsFar.forEach(c => drawCloud(c, totalOffset));
+  cloudsNear.forEach(c => drawCloud(c, totalOffset));
+
+  bonuses.forEach(b => {
+    drawBonus(b, time);
+    // Extra glow for special bonuses
+    if (b.special) {
+      const pulse = 1 + Math.sin(time * 0.006 + b.phase) * 0.3;
+      ctx.save();
+      ctx.translate(b.x, b.y);
+      ctx.globalAlpha = 0.3 * pulse;
+      const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 40);
+      if (b.drone) {
+        glow.addColorStop(0, '#44ffaa');
+        glow.addColorStop(0.5, '#44ffaa44');
+      } else {
+        glow.addColorStop(0, '#ff88ff');
+        glow.addColorStop(0.5, '#ff44ff44');
+      }
+      glow.addColorStop(1, 'transparent');
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(0, 0, 40, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  });
+  explosions.forEach(ex => drawExplosion(ex));
+
+  particles.forEach(p => {
+    const alpha = p.life / p.maxLife;
+    ctx.globalAlpha = alpha * 0.7;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * alpha, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  ctx.globalAlpha = 1;
+
+  if (plane && plane.trail.length > 2 && plane.speed > 2) {
+    ctx.globalAlpha = 0.12;
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(plane.trail[0].x, plane.trail[0].y);
+    for (let i = 1; i < plane.trail.length; i++) ctx.lineTo(plane.trail[i].x, plane.trail[i].y);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  enemyBullets.forEach(b => drawBullet(b, '#ff4444', bulletGlowEnemy));
+  bullets.forEach(b => {
+    if (b.homing) {
+      drawBullet(b, '#ff88ff', bulletGlowHoming);
+      // Draw target line
+      if (b.homingTarget) {
+        ctx.globalAlpha = 0.2;
+        ctx.strokeStyle = '#ff88ff';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([2, 4]);
+        ctx.beginPath();
+        ctx.moveTo(b.x, b.y);
+        ctx.lineTo(b.homingTarget.x, b.homingTarget.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      }
+    } else if (b.drone) {
+      drawBullet(b, '#88ffcc', bulletGlowDrone);
+    } else {
+      drawBullet(b, '#88ddff', bulletGlowNormal);
+    }
+  });
+  enemies.forEach(e => drawEnemy(e));
+  if (gameAlive) drawPlayer();
+  if (gameAlive) drawDrone();
+  drawCursor(time);
+
+  ctx.fillStyle = vignetteGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  if (damageFlash > 0) {
+    ctx.globalAlpha = damageFlash / 15;
+    ctx.fillStyle = '#ff2222';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
+  // Wave announcement
+  if (waveLabelTimer > 0) {
+    const alpha = Math.min(waveLabelTimer / 60, 1);
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.8;
+    ctx.font = 'bold 36px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = waveActive ? '#ffaa44' : '#88ccff';
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur = 8;
+    ctx.fillText(waveLabelText, W / 2, H / 2 - 40);
+    ctx.restore();
+  }
+
+  // Wave status indicator
+  if (!waveActive && waveLabelTimer <= 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    ctx.font = '13px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#88ccff';
+    const remaining = Math.ceil(waveCooldown / 60);
+    ctx.fillText(`Следующая волна: ${remaining}с`, W / 2, 30);
+    ctx.restore();
+  }
+}
+
+function loop(time) {
+  const dt = Math.min(time - lastTime, 50);
+  lastTime = time;
+  update(dt);
+  draw(time);
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
