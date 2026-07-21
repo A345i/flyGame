@@ -40,14 +40,18 @@ canvas { display: block; }
   display: none; position: fixed; inset: 0; z-index: 100;
   background: rgba(0,0,0,.7); align-items: center; justify-content: center;
   flex-direction: column; font-family: 'Segoe UI', system-ui, sans-serif; color: #fff;
+  touch-action: auto;
 }
 #game-over h1 { font-size: 48px; margin-bottom: 10px; }
 #game-over p { font-size: 18px; opacity: .7; margin-bottom: 24px; }
 #game-over button {
-  padding: 12px 32px; font-size: 18px; border: none; border-radius: 8px;
+  padding: 16px 40px; font-size: 22px; border: none; border-radius: 8px;
   background: #4a90d9; color: #fff; cursor: pointer; pointer-events: all;
+  touch-action: auto; -webkit-tap-highlight-color: transparent;
+  user-select: none; -webkit-user-select: none;
 }
 #game-over button:hover { background: #5aa0e9; }
+#game-over button:active { background: #3a80c9; }
 </style>
 </head>
 <body>
@@ -139,7 +143,14 @@ function updateMobileUI() {
   }
 }
 
+// Check if touch target is inside a UI element (game-over, fire button) — skip game logic
+function isUITarget(e) {
+  const t = e.target;
+  return t.closest('#game-over') || t.closest('#fire-btn');
+}
+
 window.addEventListener('touchstart', e => {
+  if (isUITarget(e)) return; // let clicks reach buttons
   e.preventDefault();
   if (!isMobile) {
     isMobile = true;
@@ -162,6 +173,7 @@ window.addEventListener('touchstart', e => {
 }, { passive: false });
 
 window.addEventListener('touchmove', e => {
+  if (isUITarget(e)) return;
   e.preventDefault();
   const touches = e.touches;
   if (touches.length >= 2) {
@@ -175,6 +187,7 @@ window.addEventListener('touchmove', e => {
 }, { passive: false });
 
 window.addEventListener('touchend', e => {
+  if (isUITarget(e)) return;
   e.preventDefault();
   const touches = e.touches;
   if (touches.length >= 2) {
